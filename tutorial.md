@@ -49,7 +49,7 @@ untreated4 untreated  paired-end
 `````r
 l2 = log2(cts)
 l2 = l2[is.finite(rowSums(l2)),]
-heatmap(l2[1:100,], Colv = NA, Rowv = NA)
+heatmap(l2[1:1000,])
 `````
 
 <img src="./images/log2.png" width="500">
@@ -83,6 +83,18 @@ Modeling count data
 * Count data is modeled using the binomial distribution. Yet, not all count data can be fit with the binomial distribution. The binomial is based on discrete events and used in situations when you have a certain number of cases.
 
 ### Poisson distribution VS Binomial distribution
+
+First of all, since reads are count based, they can't be normally distributed (you can't have -3 counts, or 12.2 counts). 
+
+Two distributions for count based data are 
+1. poisson (which presumes the variance and mean [ie expression in our case] are equal) or
+2. Negative binomial (which does not).
+
+This is especially a problem when the number of biological replicates are low because it is hard to accurately model variance of count based data if you are looking at only that gene and making the assumptions of normally distributed continuous data (ie a t-test). A good estimate of variance for each gene is essential to determine whether the changes are due to chance.
+
+DESeq2 allow for the **global variance** of a gene to be estimated for a certain read density. This generates a more accurate estimate of the variance than looking at each individual gene's (potentially small n) distribution. Is this dispersion ?
+
+This variance parameter is then used to model the NB distribution for each gene and therefore to more accurately estimate the error term. As the number of samples increases, the local (gene-specific) variance can be better estimated.
 
 <img src="./images/diff.png" width="500">
 
@@ -274,6 +286,7 @@ fitting model and testing
 
 ## Performing DESeq2 Workflow
 
+
 ## Design Formula
 
 Firstly, we need to have our design formula deriving from our hypothesis. In `pasilla` case, treatment of RNAi should significantly reduce the expression of the pasilla gene. 
@@ -324,7 +337,7 @@ results(dds2, contrast = contrast, alpha = 0.05)["FBgn0261552",]
 
 ### Please, compare the log2 fold changes of the gene between different designs.
 ````
-Now we follow the `DESeq()` workflow.
+## Now we follow the `DESeq()` workflow.
 
 **Step 1: estimating size factors**
 
@@ -336,15 +349,19 @@ colSums(counts(dds, normalized=T))
 ````
 **Step 2: estimating gene-wise dispersion**
 
-Dispersion is a measure of spread or variability in the data. The DESeq2 dispersion estimates are inversely related to the mean and directly related to variance. Based on this relationship, the dispersion is higher for small mean counts and lower for large mean counts.  With only a few replicates per group, the estimates of variation for each gene are often unreliable (due to the large differences in dispersion for genes with similar means).
+Dispersion is a measure of spread or variability in the data. The DESeq2 dispersion estimates are inversely related to the mean and directly related to variance. Based on this relationship, the dispersion is higher for small mean counts and lower for large mean counts and with only a few replicates per group, the estimates of variation for each gene are often unreliable (due to the large differences in dispersion for genes with similar means). 
 
 To address this problem, DESeq2 shares information across genes to generate more accurate estimates of variation based on the mean expression level of the gene using a method called 'shrinkage'. DESeq2 assumes that genes with similar expression levels have similar dispersion.
 
-To model the dispersion based on expression level (mean counts of replicates), the dispersion for each gene is estimated using maximum likelihood estimation. In other words, given the count values of the replicates, the most likely estimate of dispersion is calculated.
+To model the dispersion based on expression level (mean counts of replicates), the dispersion for each gene is estimated using maximum likelihood estimation. In other words, given the count values of the replicates, the most likely estimate of dispersion is calculated. Simply, 0.01 dispersion means 10% variation around the mean expected across biological replicates.
 
 **Step 3: fit curve to gene-wise dispersion estimates**
 
+To accurately model counts, we need to generate accurate estimates of within-group variation (variation between replicates of the same sample group) for each gene. With only a few (3-6) replicates per group, the estimates of variation for each gene are often unreliable (due to the large differences in dispersion for genes with similar means).
+
+
 The idea behind fitting a curve to the data is that different genes will have different scales of biological variability, but, over all genes, there will be a distribution of reasonable estimates of dispersion.
+
 
 ````r
 plotDispEsts(dds)
@@ -360,7 +377,11 @@ This shrinkage method is particularly important to reduce false positives in the
 
 We expect the data to generally scatter around the curve, with the dispersion decreasing with increasing mean expression levels.
 
-A bad dispersion might be :
+**A bad dispersion might be:**
+
+**contamination (mitochondrial, etc.) ?**
+
+**or outlier samples ?**
 
 <img src="./images/bad.png" width="600">
 
@@ -368,35 +389,227 @@ A bad dispersion might be :
 
 <img src="./images/disp2.png" width="600">
 
-Part I
+Problem: Sample sizes tend to be smaller (experimental designs with as little as two or three replicates are common and reasonable), resulting in highly variable dispersion estimates for each gene.
 
-1. Calculate the maximum-likelihood estimate (MLE) of dispersion for each gene in the dataset (black dots).
+Solution: DESeq2 assumes that genes of similar average expression strength have similar dispersion. 
 
-2. Model the MLEs (red curve)
+1. Treat each gene separately and estimate gene-wise dispersion estimates (using maximum likelihood), which rely only on the data of each individual gene (black dots).
+2. Next, determine the location parameter of the distribution of these estimates; to allow for dependence on average expression strength, fit a smooth curve, as shown by the red line.
+3. Shrink the gene-wise dispersion estimates toward the values predicted by the curve to obtain final dispersion values (blue arrow heads).
 
-3. From the model curve fit in 2, predict a value for each gene
-
-Part II
-
-1. Fit an empirical Bayes regression model to the MLEs and use the predicted values from the model curve fit in Step I, Part 3 (above) as the mean priors for each gene in the model. In empirical Bayesian statistics, by supplying 'priors' to the model, one is saying that these priors are the measured / empirical values and that we want to 'shrink' our current data to match the distribution of these priors.
-
-2. Predict values from this model (blue dots) - these are the final dispersion estimates. What happens is that genes with lower counts have higher dispersion and are 'shrunk' more toward the red line than higher counts, which have lower dispersion.*”
+Strength of shrinkage depends 
+* on an estimate of how close true dispersion values tend to be to the fit 
+* on the degrees of freedom: as the sample size increases, the shrinkage decreases in strength.
 
 
 
 # Generalized Linear Model
 
+The final step in the DESeq2 workflow is fitting the Negative Binomial model for each gene and performing differential expression testing.
+
+The count data generated by RNA-seq exhibits overdispersion (variance > mean) and the statistical distribution used to model the counts needs to account for this overdispersion. DESeq2 uses a negative binomial distribution to model the RNA-seq counts.
+
+In the simplest case of a comparison between two groups, such as treated and control samples, the design matrix elements indicate whether a sample j is treated or not, and the GLM fit returns coefficients indicating the overall expression strength of the gene and the log 2 fold change between treatment and control.
+
 # Shrunken log2 foldchanges
+
+Problem: A common difficulty in the analysis of RNA-seq data is the strong variance of LFC estimates for genes with low read count. Weakly expressed genes seem to show much stronger differences than strongly expressed genes. Variance of LFCs depending on mean count complicates downstream analysis and data interpretation.
+
+Solution: Similar to dispersion shrinkage. Shrinking LFC estimates toward zero in a manner such that shrinkage is stronger when the available information for a gene is low.
+
+Information for a gene ? 
+*  Low counts
+* High dispersion values
+
+An example from DESeq2 paper:
+<img src="./images/deseq2_shrunken_lfc.png" width="600">
+* The green gene and purple gene have the same mean values for the two sample groups
+* Green gene has little variation while the purple gene has high levels of variation
+* For green gene, unshrunken LFC estimate is very similar to the shrunken LFC
+* Shrunken LFC of purple gene is quite different due to the high dispersion
+
+Meaning that:
+
+Two genes can have similar normalized count values, but different degrees of LFC shrinkage will be applied.
 
 # Wald test
 
+The first step in hypothesis testing is to set up a null hypothesis for each gene. In our case is, the null hypothesis is that there is no differential expression across the two sample groups (LFC == 0).
+
+With DESeq2, the Wald test is commonly used for hypothesis testing when comparing two groups. A Wald test statistic is computed along with a probability that a test statistic at least as extreme as the observed value were selected at random. This probability is called the p-value of the test. If the p-value is small we reject the null hypothesis and state that there is evidence against the null meaning that the gene is differentially expressed.
+
+## Creating contrasts
+
+To indicate to DESeq2 the two groups we want to compare, we can use contrasts. Contrasts are then provided to DESeq2 to perform differential expression testing using the Wald test. Contrasts can be provided to DESeq2 a couple of different ways:
+
+1. Do nothing. Automatically DESeq2 will use the base factor level of the condition of interest as the base for statistical testing. The base level is chosen based on alphabetical order of the levels.
+
+2. In the results() function you can specify the comparison of interest, and the levels to compare. The level given last is the base level for the comparison. The syntax is given below:
+
+### **Lets compare treated vs untreated**
+
+````r
+### contrast syntax
+### contrast <- c("condition", "level_to_compare", "base_level")
+
+contrast = c("condition","treated","untreated")
+results(dds, contrast = contrast, alpha = 0.05)
+
+
+````
+
+## Independent Filtering
+
+You will notice that some of the adjusted p-values (padj) are NA. We know that there is no need to pre-filter the genes as DESeq2 will do this through a process it calls ‘independent filtering’. The genes with NA are the ones DESeq2 has filtered out.
+
+From DESeq2 manual: “The results function of the DESeq2 package performs independent filtering by default using the mean of normalized counts as a filter statistic. A threshold on the filter statistic is found which optimizes the number of adjusted p values lower than a [specified] significance level”.
+
+The default significance level for independent filtering is 0.1, however, you should set this to the FDR cut off you are planning to use. We will use 0.05 - this was the purpose of the alpha argument in the previous command.
+
+Basically, by removing the weakly-expressed genes from the input to the FDR procedure, we can find more genes to be significant among those
+which we keep, and so improved the power of our FDR test.
+
 # FDR/Benjamini-Hochberg
+
+If we used the p-value directly from the Wald test with a significance cut-off of p < 0.05, that means there is a 5% chance it is a false positives. Each p-value is the result of a single test (single gene). The more genes we test, the more we inflate the false positive rate. This is the multiple testing problem. For example, if we test 20,000 genes for differential expression, at p < 0.05 we would expect to find 1,000 genes by chance. If we found 3000 genes to be differentially expressed total, roughly one third of our genes are false positives. We would not want to match "significant" genes and identify which ones are true positives.
+
+FDR: Benjamini and Hochberg (BH, 1995) defined the concept of FDR and created an algorithm to control the expected FDR below a specified level given a list of independent p-values. 
+
+In DESeq2, the p-values by the Wald test are corrected for multiple testing using the Benjamini and Hochberg method by default. The p-adjusted values should be used to determine significant genes. The significant genes can be output for visualization or functional analysis. 
 
 # Extracting significant differentially expressed genes
 
 # Plotting the results
 
+## Building the results table
 
+````r
+contrast = c("condition","treated","untreated")
+res_tableOE_unshrunken <- results(dds, contrast=contrast, alpha = 0.05)
+
+res_tableOE <- lfcShrink(dds, contrast=contrast, res=res_tableOE_unshrunken)
+````
+
+## Summary of results
+
+````r
+summary(res_tableOE)
+````
+
+## MA Plot
+
+The MA plot shows the mean of the normalized counts versus the log2 foldchanges for all genes tested. The genes that are significantly DE are colored to be easily identified. This is also a great way to illustrate the effect of LFC shrinkage. The DESeq2 package offers a simple function to generate an MA plot.
+
+````r
+plotMA(res_tableOE_unshrunken, ylim=c(-2,2))
+### vs
+plotMA(res_tableOE, ylim=c(-2,2))
+````
+
+## Plotting counts
+````r
+### FBgn0261552 is the stable gene id for pasilla gene.
+plotCounts(dds, gene="FBgn0261552", intgroup="condition") 
+````
+
+## Using ggplot2 to plot expression of a single gene
+````r
+# Save plotcounts to a data frame object
+d <- plotCounts(dds, gene="FBgn0261552", intgroup="condition", returnData=TRUE)
+
+### check d
+d
+
+ggplot(d, aes(x = condition, y = count, color = condition)) + 
+    geom_label(aes(label = rownames(d))) +
+    theme_bw() +
+    ggtitle("Pasilla") +
+    theme(plot.title = element_text(hjust = 0.5))
+````
+
+## Extracting significant differentially expressed genes
+````r
+### Set thresholds
+padj.cutoff <- 0.05
+lfc.cutoff <- 0.58
+
+res_tableOE_df <- data.frame(res_tableOE)
+res_tableOE_df$ensembl_gene_id <- rownames(res_tableOE_df)
+rownames(res_tableOE_df) <- NULL
+
+
+sig <- subset(res_tableOE_df, abs(log2FoldChange) >= lfc.cutoff & padj <= padj.cutoff)
+
+sig
+````
+## Volcano Plots
+A commonly used plot for global view of genes is a volcano plot; in which you have the log transformed adjusted p-values plotted on the y-axis and log2 fold change values on the x-axis.
+
+
+````r
+
+FUN <- function(x){
+    x$oe = ifelse(abs(x$log2FoldChange) >= 0.58 & x$padj <= 0.05, TRUE, FALSE)
+    return(x)
+}
+
+column <- by(res_tableOE_df, INDICES = res_tableOE_df$gene, FUN = FUN)
+res_tableOE_volcano <- do.call(rbind, column)
+### Dont wory for the several lines of code above, it just adds a new column to the res_tableOE_df, for annotating if the gene is significant or not. In yes or no manner. So that, we can color differently in our volcano plot. Another option can be dplyr::mutate()
+
+# library("dplyr")
+# res_tableOE_volcano <- res_tableOE_df %>% 
+#                  mutate(oe = padj < 0.05 & abs(log2FoldChange) >= 0.58)
+
+ggplot(res_tableOE_volcano) +
+        geom_point(aes(x = log2FoldChange, y = -log10(padj), colour = oe)) +
+        ggtitle("Pasilla Dataset") +
+        xlab("log2 fold change") + 
+        ylab("-log10 adjusted p-value") +
+        theme(legend.position = "none",
+              plot.title = element_text(size = rel(1.5), hjust = 0.5),
+              axis.title = element_text(size = rel(1.25)))  
+
+````
+# Functional Analysis
+
+If you would like to complete this section on your own, please download `biomaRt`, `org.Dm.eg.db` and `clusterProfiler` with `BiocManager` after the tutorial.
+
+````r
+library("biomaRt")
+
+mart <- useMart("ENSEMBL_MART_ENSEMBL")
+mart <- useDataset("dmelanogaster_gene_ensembl", mart)
+
+ensLookup <- sig$ensembl_gene_id
+
+annotLookup <- getBM(
+  mart=mart,
+  attributes=c("external_gene_name","gene_biotype", "ensembl_gene_id"),
+  filter="ensembl_gene_id",
+  values=ensLookup,
+  uniqueRows=TRUE)
+
+annotated_results <- merge(annotLookup,sig,by="ensembl_gene_id")
+
+library("clusterProfiler")
+library("org.Dm.eg.db")
+
+ego <- enrichGO(gene = annotated_results$ensembl_gene_id,
+                keyType = "ENSEMBL",
+                OrgDb = org.Dm.eg.db, 
+                ont = "BP", 
+                pAdjustMethod = "BH", 
+                qvalueCutoff = 0.05, 
+                readable = TRUE)
+
+##Visualize
+
+dotplot(ego, showCategory=50)
+emapplot(ego, showCategory = 50)
+
+
+````
 
 **Credits:**
 
